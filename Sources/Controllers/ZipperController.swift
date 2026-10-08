@@ -28,12 +28,8 @@ struct ZipperController: RouteCollection {
             throw Abort(.unauthorized, reason: "Missing authentication token")
         }
 
-        let baseURL = Environment.get("FYNNCLOUD_API_URL") ?? "http://127.0.0.1:8080"
-        let service = ZipperService(
-            httpClient: req.application.http.client.shared,
-            baseURL: baseURL,
-            logger: req.logger
-        )
+        let apiClient = FynnCloudAPIClient(req: req)
+        let service = ZipperService(client: apiClient, logger: req.logger)
 
         return try await service.createArchive(request: input, token: token)
     }

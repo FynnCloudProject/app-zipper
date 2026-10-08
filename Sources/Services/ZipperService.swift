@@ -1,14 +1,13 @@
-import AsyncHTTPClient
 import Foundation
 import Logging
 import Vapor
 
 struct ZipperService {
-    let client: FynnCloudClient
+    let client: FynnCloudAPIClient
     let logger: Logger
 
-    init(httpClient: HTTPClient, baseURL: String, logger: Logger) {
-        self.client = FynnCloudClient(client: httpClient, baseURL: baseURL, logger: logger)
+    init(client: FynnCloudAPIClient, logger: Logger) {
+        self.client = client
         self.logger = logger
     }
 
@@ -62,20 +61,20 @@ struct ZipperService {
         for targetIDs: [UUID],
         fallbackParent: UUID?,
         token: String
-    ) async throws -> ([UUID: RemoteFileMetadata], UUID?) {
-        var metadata: [UUID: RemoteFileMetadata] = [:]
+    ) async throws -> ([UUID: FileIndexItemDTO], UUID?) {
+        var metadata: [UUID: FileIndexItemDTO] = [:]
         var parentID = fallbackParent
 
-        try await withThrowingTaskGroup(of: (UUID, RemoteFileMetadata).self) { group in
+        try await withThrowingTaskGroup(of: (UUID, FileIndexItemDTO).self) { group in
             for id in targetIDs {
                 group.addTask {
-                    let meta = try await self.client.fetchMetadata(fileID: id, token: token)
-                    return (id, meta)
+                    let item = try await self.client.getFile(id: id, token: token)
+                    return (id, item)
                 }
             }
-            for try await (id, meta) in group {
-                metadata[id] = meta
-                if parentID == nil, let p = meta.parent?.id {
+            for try await (id, item) in group {
+                metadata[id] = item
+                if parentID == nil, let p = item.parent?.id {
                     parentID = p
                 }
             }
@@ -86,7 +85,7 @@ struct ZipperService {
 
     private func stageTree(
         targetIDs: [UUID],
-        metadata: [UUID: RemoteFileMetadata],
+        metadata: [UUID: FileIndexItemDTO],
         stagingDir: URL,
         token: String
     ) async throws -> [DownloadTask] {
@@ -96,10 +95,10 @@ struct ZipperService {
 
         for id in targetIDs {
             guard let meta = metadata[id] else { continue }
-            let name = uniqueFilename(meta.filename, isDirectory: meta.isDirectory == true, existing: &existingNames)
+            let name = uniqueFilename(meta.filename, isDirectory: meta.isDirectory, existing: &existingNames)
             let dest = stagingDir.appendingPathComponent(name)
 
-            if meta.isDirectory == true {
+            if meta.isDirectory {
                 try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
                 folderQueue.append((folderID: id, localDir: dest))
             } else {
@@ -109,7 +108,7 @@ struct ZipperService {
 
         while !folderQueue.isEmpty {
             let (folderID, localDir) = folderQueue.removeFirst()
-            let children = try await client.listFolder(folderID: folderID, token: token)
+            let children = try await client.listChildren(folderID: folderID, token: token)
             var folderNames = Set<String>()
 
             for child in children {
@@ -139,7 +138,7 @@ struct ZipperService {
             for _ in 0..<concurrency {
                 if let task = iterator.next() {
                     group.addTask {
-                        try await self.client.streamDownload(fileID: task.fileID, to: task.destination, token: token)
+                        try await self.client.download(fileID: task.fileID, to: task.destination, token: token)
                     }
                 }
             }
@@ -147,7 +146,7 @@ struct ZipperService {
             while let _ = try await group.next() {
                 if let next = iterator.next() {
                     group.addTask {
-                        try await self.client.streamDownload(fileID: next.fileID, to: next.destination, token: token)
+                        try await self.client.download(fileID: next.fileID, to: next.destination, token: token)
                     }
                 }
             }
@@ -180,13 +179,12 @@ struct ZipperService {
     private func resolveArchiveName(
         _ requested: String?,
         targetIDs: [UUID],
-        metadata: [UUID: RemoteFileMetadata]
+        metadata: [UUID: FileIndexItemDTO]
     ) -> String {
         var name = (requested ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if name.isEmpty {
             if targetIDs.count == 1, let firstID = targetIDs.first, let meta = metadata[firstID] {
-                let isDir = meta.isDirectory == true
-                let stem = isDir ? meta.filename : (meta.filename as NSString).deletingPathExtension
+                let stem = meta.isDirectory ? meta.filename : (meta.filename as NSString).deletingPathExtension
                 name = "\(stem).zip"
             } else {
                 name = "Archive.zip"

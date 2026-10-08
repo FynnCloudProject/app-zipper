@@ -32,27 +32,27 @@ struct ZipResponse: Content {
     let message: String
 }
 
-struct RemoteFileMetadata: Content {
+struct FileIndexItemDTO: Content {
     let id: UUID?
     let filename: String
+    let contentType: String
     let size: Int64
-    let isDirectory: Bool?
-    let parent: ParentRef?
+    let isDirectory: Bool
+    let lastModified: Date?
+    let createdAt: Date?
+    let uploadedAt: Date?
+    let parent: ParentID?
 
-    struct ParentRef: Content {
+    struct ParentID: Content {
         let id: UUID
     }
 }
 
-struct RemoteFolderListing: Content {
-    let files: [RemoteItem]
-
-    struct RemoteItem: Content {
-        let id: UUID?
-        let filename: String
-        let size: Int64
-        let isDirectory: Bool
-    }
+struct FileIndexDTO: Content {
+    let files: [FileIndexItemDTO]
+    let parentID: UUID?
+    let totalCount: Int
+    let hasMore: Bool
 }
 
 struct HealthResponse: Content {
