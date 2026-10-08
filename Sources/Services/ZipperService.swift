@@ -3,21 +3,21 @@ import Foundation
 import Logging
 import Vapor
 
-public struct ZipperService: Sendable {
-    private let client: FynnCloudClient
-    private let logger: Logger
+struct ZipperService {
+    let client: FynnCloudClient
+    let logger: Logger
 
-    public init(httpClient: HTTPClient, baseURL: String, logger: Logger) {
+    init(httpClient: HTTPClient, baseURL: String, logger: Logger) {
         self.client = FynnCloudClient(client: httpClient, baseURL: baseURL, logger: logger)
         self.logger = logger
     }
 
-    private struct DownloadTask: Sendable {
+    private struct DownloadTask {
         let fileID: UUID
         let destination: URL
     }
 
-    public func createArchive(request: ZipRequest, token: String) async throws -> ZipResponse {
+    func createArchive(request: ZipRequest, token: String) async throws -> ZipResponse {
         let targetIDs = request.resolvedFileIDs
         guard !targetIDs.isEmpty else {
             throw Abort(.badRequest, reason: "No files specified for compression")
@@ -45,7 +45,7 @@ public struct ZipperService: Sendable {
             token: token
         )
 
-        let formatted = ByteFormatter.format(archiveSize)
+        let formatted = ByteCountFormatter.string(fromByteCount: archiveSize, countStyle: .binary)
         logger.info("Created '\(finalName)' (\(formatted))")
 
         return ZipResponse(

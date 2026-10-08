@@ -4,18 +4,18 @@ import Logging
 import NIOCore
 import Vapor
 
-public struct FynnCloudClient: Sendable {
-    private let client: HTTPClient
-    private let baseURL: String
-    private let logger: Logger
+struct FynnCloudClient {
+    let client: HTTPClient
+    let baseURL: String
+    let logger: Logger
 
-    public init(client: HTTPClient, baseURL: String, logger: Logger) {
+    init(client: HTTPClient, baseURL: String, logger: Logger) {
         self.client = client
         self.baseURL = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
         self.logger = logger
     }
 
-    public func fetchMetadata(fileID: UUID, token: String) async throws -> RemoteFileMetadata {
+    func fetchMetadata(fileID: UUID, token: String) async throws -> RemoteFileMetadata {
         var req = HTTPClientRequest(url: "\(baseURL)/api/files/\(fileID.uuidString)")
         req.method = .GET
         req.headers.bearerAuthorization = BearerAuthorization(token: token)
@@ -29,7 +29,7 @@ public struct FynnCloudClient: Sendable {
         return try JSONDecoder().decode(RemoteFileMetadata.self, from: buffer)
     }
 
-    public func listFolder(folderID: UUID, token: String) async throws -> [RemoteFolderListing.RemoteItem] {
+    func listFolder(folderID: UUID, token: String) async throws -> [RemoteFolderListing.RemoteItem] {
         var req = HTTPClientRequest(url: "\(baseURL)/api/files?parentID=\(folderID.uuidString)")
         req.method = .GET
         req.headers.bearerAuthorization = BearerAuthorization(token: token)
@@ -44,7 +44,7 @@ public struct FynnCloudClient: Sendable {
         return listing.files
     }
 
-    public func streamDownload(fileID: UUID, to destination: URL, token: String) async throws {
+    func streamDownload(fileID: UUID, to destination: URL, token: String) async throws {
         var req = HTTPClientRequest(url: "\(baseURL)/api/files/\(fileID.uuidString)/download")
         req.method = .GET
         req.headers.bearerAuthorization = BearerAuthorization(token: token)
@@ -63,7 +63,7 @@ public struct FynnCloudClient: Sendable {
         }
     }
 
-    public func uploadArchive(
+    func uploadArchive(
         name: String,
         fileURL: URL,
         size: Int64,
