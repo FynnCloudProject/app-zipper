@@ -9,7 +9,7 @@ COPY . .
 RUN swift build -c release --static-swift-stdlib
 
 # Runtime stage
-FROM ubuntu:noble-slim
+FROM ubuntu:noble
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     zip \
