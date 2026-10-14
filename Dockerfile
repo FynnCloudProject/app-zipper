@@ -20,6 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY --from=build /build/.build/release/Zipper /app/zipper
 
+USER ubuntu
+
 ENV PORT=8080
 ENV HOST=0.0.0.0
 EXPOSE 8080
