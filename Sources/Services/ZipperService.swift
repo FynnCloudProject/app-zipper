@@ -155,7 +155,8 @@ struct ZipperService {
 
     private func compress(from sourceDir: URL, to archiveURL: URL, level: Int) throws -> Int64 {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+        let zipBinary = ["/usr/bin/zip", "/bin/zip"].first(where: { FileManager.default.isExecutableFile(atPath: $0) }) ?? "/usr/bin/zip"
+        process.executableURL = URL(fileURLWithPath: zipBinary)
         process.arguments = ["-\(level)", "-q", "-r", archiveURL.path, "."]
         process.currentDirectoryURL = sourceDir
 
