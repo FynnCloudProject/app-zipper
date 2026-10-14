@@ -270,7 +270,6 @@ struct FynnCloudAPIClient: Sendable {
         parentID: UUID?,
         token: String
     ) async throws -> (finalName: String, fileID: UUID?) {
-        let zipData = try Data(contentsOf: fileURL, options: .mappedIfSafe)
         var candidateName = name
 
         for attempt in 1...20 {
@@ -289,7 +288,28 @@ struct FynnCloudAPIClient: Sendable {
             req.headers.bearerAuthorization = BearerAuthorization(token: token)
             req.headers.replaceOrAdd(name: .contentType, value: "application/zip")
             req.headers.replaceOrAdd(name: .contentLength, value: String(size))
-            req.body = .bytes(zipData)
+
+            let fileHandle = try FileHandle(forReadingFrom: fileURL)
+            let stream = AsyncStream<ByteBuffer> { continuation in
+                while true {
+                    do {
+                        let chunk = try fileHandle.read(upToCount: 256 * 1024)
+                        guard let chunk, !chunk.isEmpty else {
+                            try? fileHandle.close()
+                            continuation.finish()
+                            break
+                        }
+                        var buffer = ByteBufferAllocator().buffer(capacity: chunk.count)
+                        buffer.writeBytes(chunk)
+                        continuation.yield(buffer)
+                    } catch {
+                        try? fileHandle.close()
+                        continuation.finish()
+                        break
+                    }
+                }
+            }
+            req.body = .stream(stream, length: .known(size))
 
             let res = try await client.execute(req, timeout: .minutes(5))
 
