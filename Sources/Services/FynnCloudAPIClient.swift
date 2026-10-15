@@ -227,40 +227,29 @@ struct FynnCloudAPIClient: Sendable {
         }
     }
 
-    func upload(
-        filename: String,
-        parentID: UUID?,
-        body: HTTPClientRequest.Body,
-        contentLength: Int64?,
-        contentType: String,
-        token: String,
-        overwrite: Bool
-    ) async throws -> Response {
-        var query = [
-            "filename=\(filename.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? filename)",
-            "overwrite=\(overwrite ? "true" : "false")"
-        ]
-        if let parentID {
-            query.append("parentID=\(parentID.uuidString)")
-        }
-        if let contentLength {
-            query.append("size=\(contentLength)")
-        }
+    private struct InitiateMultipartPayload: Encodable {
+        let filename: String
+        let contentType: String
+        let totalSize: Int64
+        let parentID: UUID?
+    }
 
-        var req = HTTPClientRequest(url: "\(baseURL)/api/files/upload?\(query.joined(separator: "&"))")
-        req.method = .POST
-        req.headers.bearerAuthorization = BearerAuthorization(token: token)
-        req.headers.replaceOrAdd(name: .contentType, value: contentType)
-        if let contentLength {
-            req.headers.replaceOrAdd(name: .contentLength, value: String(contentLength))
-        }
-        req.body = body
+    private struct InitiateMultipartResponseDTO: Decodable {
+        let sessionID: UUID
+        let fileID: UUID
+        let uploadID: String
+        let maxChunkSize: Int64
+        let token: String
+    }
 
-        let res = try await client.execute(req, timeout: .hours(4))
-        guard res.status == .ok || res.status == .created else {
-            throw Abort(res.status)
-        }
-        return Response(status: res.status)
+    private struct PartResultDTO: Codable {
+        let partNumber: Int
+        let etag: String
+        let size: Int64
+    }
+
+    private struct CompleteMultipartPayload: Encodable {
+        let parts: [PartResultDTO]
     }
 
     func uploadArchive(
@@ -271,66 +260,117 @@ struct FynnCloudAPIClient: Sendable {
         token: String
     ) async throws -> (finalName: String, fileID: UUID?) {
         var candidateName = name
+        var initiatedSession: InitiateMultipartResponseDTO?
 
         for attempt in 1...20 {
-            var query = [
-                "filename=\(candidateName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? candidateName)",
-                "overwrite=false",
-                "size=\(size)",
-                "contentType=application/zip"
-            ]
-            if let parentID {
-                query.append("parentID=\(parentID.uuidString)")
-            }
+            let payload = InitiateMultipartPayload(
+                filename: candidateName,
+                contentType: "application/zip",
+                totalSize: size,
+                parentID: parentID
+            )
+            var initReq = HTTPClientRequest(url: "\(baseURL)/api/files/multipart/initiate")
+            initReq.method = .POST
+            initReq.headers.bearerAuthorization = BearerAuthorization(token: token)
+            initReq.headers.replaceOrAdd(name: .contentType, value: "application/json")
+            initReq.body = .bytes(try JSONEncoder().encode(payload))
 
-            var req = HTTPClientRequest(url: "\(baseURL)/api/files/upload?\(query.joined(separator: "&"))")
-            req.method = .POST
-            req.headers.bearerAuthorization = BearerAuthorization(token: token)
-            req.headers.replaceOrAdd(name: .contentType, value: "application/zip")
-            req.headers.replaceOrAdd(name: .contentLength, value: String(size))
-
-            let fileHandle = try FileHandle(forReadingFrom: fileURL)
-            let stream = AsyncStream<ByteBuffer> { continuation in
-                while true {
-                    do {
-                        let chunk = try fileHandle.read(upToCount: 256 * 1024)
-                        guard let chunk, !chunk.isEmpty else {
-                            try? fileHandle.close()
-                            continuation.finish()
-                            break
-                        }
-                        var buffer = ByteBufferAllocator().buffer(capacity: chunk.count)
-                        buffer.writeBytes(chunk)
-                        continuation.yield(buffer)
-                    } catch {
-                        try? fileHandle.close()
-                        continuation.finish()
-                        break
-                    }
-                }
-            }
-            req.body = .stream(stream, length: .known(size))
-
-            let res = try await client.execute(req, timeout: .minutes(5))
-
-            if res.status == .ok || res.status == .created {
-                var createdID: UUID?
-                if let body = try? await res.body.collect(upTo: 64 * 1024) {
-                    struct UploadResult: Decodable { let id: UUID? }
-                    createdID = try? JSONDecoder().decode(UploadResult.self, from: body).id
-                }
-                return (candidateName, createdID)
-            }
-
-            if res.status == .conflict {
+            let initRes = try await client.execute(initReq, timeout: .seconds(30))
+            if initRes.status == .conflict {
                 let stem = (name as NSString).deletingPathExtension
                 candidateName = "\(stem) (\(attempt)).zip"
                 continue
             }
+            guard initRes.status == .ok || initRes.status == .created else {
+                throw Abort(initRes.status, reason: "Failed to initiate archive upload")
+            }
 
-            throw Abort(res.status, reason: "Failed to upload archive to destination")
+            let body = try await initRes.body.collect(upTo: 64 * 1024)
+            initiatedSession = try Self.decoder.decode(InitiateMultipartResponseDTO.self, from: body)
+            break
         }
 
-        throw Abort(.conflict, reason: "Could not find an available filename for archive")
+        guard let session = initiatedSession else {
+            throw Abort(.conflict, reason: "Could not find an available filename for archive")
+        }
+
+        let chunkSize = Swift.max(Int64(5 * 1024 * 1024), Swift.min(session.maxChunkSize, Int64(16 * 1024 * 1024)))
+        let fileHandle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? fileHandle.close() }
+
+        var completedParts: [PartResultDTO] = []
+        var partNumber = 1
+        var remainingTotal = size
+
+        do {
+            while remainingTotal > 0 {
+                let partSize = Swift.min(chunkSize, remainingTotal)
+                var partRemaining = partSize
+
+                let partStream = AsyncStream<ByteBuffer> { continuation in
+                    while partRemaining > 0 {
+                        let toRead = Int(Swift.min(partRemaining, Int64(64 * 1024)))
+                        guard let slice = try? fileHandle.read(upToCount: toRead), !slice.isEmpty else {
+                            break
+                        }
+                        var buffer = ByteBufferAllocator().buffer(capacity: slice.count)
+                        buffer.writeBytes(slice)
+                        continuation.yield(buffer)
+                        partRemaining -= Int64(slice.count)
+                    }
+                    continuation.finish()
+                }
+
+                var partReq = HTTPClientRequest(
+                    url: "\(baseURL)/api/files/multipart/\(session.sessionID.uuidString)/part/\(partNumber)"
+                )
+                partReq.method = .PUT
+                partReq.headers.bearerAuthorization = BearerAuthorization(token: session.token)
+                partReq.headers.replaceOrAdd(name: .contentType, value: "application/octet-stream")
+                partReq.headers.replaceOrAdd(name: .contentLength, value: String(partSize))
+                partReq.body = .stream(partStream, length: .known(partSize))
+
+                let partRes = try await client.execute(partReq, timeout: .minutes(5))
+                guard partRes.status == .ok || partRes.status == .created else {
+                    throw Abort(partRes.status, reason: "Failed to upload archive part \(partNumber)")
+                }
+
+                let partBody = try await partRes.body.collect(upTo: 64 * 1024)
+                let partDTO = try Self.decoder.decode(PartResultDTO.self, from: partBody)
+                completedParts.append(partDTO)
+                remainingTotal -= partSize
+                partNumber += 1
+            }
+
+            var completeReq = HTTPClientRequest(
+                url: "\(baseURL)/api/files/multipart/\(session.sessionID.uuidString)/complete"
+            )
+            completeReq.method = .POST
+            completeReq.headers.bearerAuthorization = BearerAuthorization(token: session.token)
+            completeReq.headers.replaceOrAdd(name: .contentType, value: "application/json")
+            completeReq.body = .bytes(try JSONEncoder().encode(CompleteMultipartPayload(parts: completedParts)))
+
+            let completeRes = try await client.execute(completeReq, timeout: .minutes(2))
+            guard completeRes.status == .ok || completeRes.status == .created else {
+                throw Abort(completeRes.status, reason: "Failed to complete archive upload")
+            }
+
+            var createdID: UUID? = session.fileID
+            if let body = try? await completeRes.body.collect(upTo: 64 * 1024) {
+                struct UploadResult: Decodable { let id: UUID? }
+                if let decodedID = try? Self.decoder.decode(UploadResult.self, from: body).id {
+                    createdID = decodedID
+                }
+            }
+            return (candidateName, createdID)
+        } catch {
+            var abortReq = HTTPClientRequest(
+                url: "\(baseURL)/api/files/multipart/\(session.sessionID.uuidString)/abort"
+            )
+            abortReq.method = .DELETE
+            abortReq.headers.bearerAuthorization = BearerAuthorization(token: session.token)
+            _ = try? await client.execute(abortReq, timeout: .seconds(15))
+            throw error
+        }
     }
 }
